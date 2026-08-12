@@ -1,0 +1,418 @@
+# ZeyLang v2.0 — self-hosted Interpreter/Visitor (subset, written IN ZeyLang)
+#
+# Walks the tagged-list AST from parser.zey and executes it.
+#
+# ZeyLang has no exceptions and no mutation, so this looks quite
+# different from the Python visitor.py:
+#  - No mutable Environment object — env is a list of [name, value]
+#    pairs, and every exec_* function takes an env and returns an
+#    UPDATED one (env_set returns a new list rather than mutating).
+#  - No break/continue/return via exception — exec_* functions return
+#    [signal, value, env] where signal is "normal"/"break"/"continue"/
+#    "return"; every caller (block, loop, if) checks it explicitly and
+#    either keeps going or propagates it upward.
+#  - Functions live in a separate `functions` table (list of
+#    [name, [params, body]]), built once from the top-level FuncDefs,
+#    and passed alongside env everywhere — ZeyLang has no closures in
+#    this subset, so a call always gets a brand new, empty local env
+#    (just its own params) plus the same global `functions` table
+#    (which is how recursion resolves the function being called).
+#  - Only a representative subset of ai/robot/space is implemented
+#    (this file can't call back into the *host's* real ai/robot/space —
+#    it's a self-contained interpreter, so it has to implement its own
+#    stub behavior for them, same idea as visitor.py's stubs).
+
+def env_get(env, name) {
+    for pair in env {
+        if pair[0] == name {
+            return pair[1]
+        }
+    }
+    error("undefined variable: " + name)
+    return none
+}
+
+def env_set(env, name, value) {
+    result = []
+    found = false
+    for pair in env {
+        if pair[0] == name {
+            result = result + [[name, value]]
+            found = true
+        } else {
+            result = result + [pair]
+        }
+    }
+    if found == false {
+        result = result + [[name, value]]
+    }
+    return result
+}
+
+def truthy(v) {
+    if v == none { return false }
+    if v == false { return false }
+    if v == 0 { return false }
+    if v == "" { return false }
+    if v == [] { return false }
+    return true
+}
+
+def make_range(a, b) {
+    result = []
+    i = a
+    while i < b {
+        result = result + [i]
+        i = i + 1
+    }
+    return result
+}
+
+def find_function(functions, name) {
+    for pair in functions {
+        if pair[0] == name {
+            return pair[1]
+        }
+    }
+    return none
+}
+
+# ---- expressions ----
+
+def eval_expr(functions, node, env) {
+    tag = node[0]
+    if tag == "NumLit" {
+        return node[1]
+    }
+    if tag == "StrLit" {
+        return node[1]
+    }
+    if tag == "BoolLit" {
+        return node[1]
+    }
+    if tag == "NoneLit" {
+        return none
+    }
+    if tag == "Identifier" {
+        return env_get(env, node[1])
+    }
+    if tag == "ListLiteral" {
+        return eval_list(functions, node[1], env)
+    }
+    if tag == "BinOp" {
+        return eval_binop(functions, node, env)
+    }
+    if tag == "UnaryOp" {
+        return eval_unaryop(functions, node, env)
+    }
+    if tag == "Call" {
+        return eval_call(functions, node, env)
+    }
+    if tag == "Index" {
+        return eval_index(functions, node, env)
+    }
+    error("visitor: unknown expression")
+    return none
+}
+
+def eval_list(functions, elements, env) {
+    result = []
+    for el in elements {
+        result = result + [eval_expr(functions, el, env)]
+    }
+    return result
+}
+
+def eval_binop(functions, node, env) {
+    op = node[1]
+    if op == "and" {
+        left = eval_expr(functions, node[2], env)
+        if truthy(left) == false {
+            return left
+        }
+        return eval_expr(functions, node[3], env)
+    }
+    if op == "or" {
+        left = eval_expr(functions, node[2], env)
+        if truthy(left) {
+            return left
+        }
+        return eval_expr(functions, node[3], env)
+    }
+    left = eval_expr(functions, node[2], env)
+    right = eval_expr(functions, node[3], env)
+    if op == "+" { return left + right }
+    if op == "-" { return left - right }
+    if op == "*" { return left * right }
+    if op == "/" { return left / right }
+    if op == "==" { return left == right }
+    if op == "!=" { return left != right }
+    if op == "<" { return left < right }
+    if op == ">" { return left > right }
+    if op == "<=" { return left <= right }
+    if op == ">=" { return left >= right }
+    error("visitor: unknown operator")
+    return none
+}
+
+def eval_unaryop(functions, node, env) {
+    op = node[1]
+    val = eval_expr(functions, node[2], env)
+    if op == "-" {
+        return 0 - val
+    }
+    if op == "not" {
+        return truthy(val) == false
+    }
+    error("visitor: unknown unary operator")
+    return none
+}
+
+def eval_index(functions, node, env) {
+    obj = eval_expr(functions, node[1], env)
+    idx = eval_expr(functions, node[2], env)
+    return obj[idx]
+}
+
+def call_user_function(functions, fn_entry, arg_values) {
+    params = fn_entry[0]
+    body = fn_entry[1]
+    local_env = []
+    i = 0
+    n = len(params)
+    while i < n {
+        local_env = env_set(local_env, params[i], arg_values[i])
+        i = i + 1
+    }
+    result = exec_block(functions, body, local_env)
+    if result[0] == "return" {
+        return result[1]
+    }
+    return none
+}
+
+def eval_args(functions, arg_nodes, env) {
+    values = []
+    for a in arg_nodes {
+        values = values + [eval_expr(functions, a, env)]
+    }
+    return values
+}
+
+def eval_call(functions, node, env) {
+    callee = node[1]
+    arg_nodes = node[2]
+
+    if callee[0] == "Attribute" {
+        ns = callee[1][1]
+        method = callee[2]
+        if ns == "ai" and method == "chat" {
+            msg = eval_expr(functions, arg_nodes[0], env)
+            print("[ai@chat] " + msg)
+            return msg
+        }
+        if ns == "robot" and method == "walk" {
+            steps = eval_expr(functions, arg_nodes[0], env)
+            print("[robot@walk] walking")
+            return steps
+        }
+        if ns == "robot" and method == "arm" {
+            angle = eval_expr(functions, arg_nodes[1], env)
+            print("[robot@arm] moving servo")
+            return angle
+        }
+        if ns == "robot" and method == "grip" {
+            state = eval_expr(functions, arg_nodes[0], env)
+            print("[robot@grip] gripper -> " + state)
+            return state
+        }
+        if ns == "robot" and method == "speak" {
+            text = eval_expr(functions, arg_nodes[0], env)
+            print("[robot@speak] " + text)
+            return text
+        }
+        if ns == "space" and method == "orbit" {
+            alt = eval_expr(functions, arg_nodes[0], env)
+            print("[space@orbit] orbiting")
+            return alt
+        }
+        if ns == "space" and method == "launch" {
+            payload = eval_expr(functions, arg_nodes[0], env)
+            print("[space@launch] launching " + payload)
+            return payload
+        }
+        error("visitor: unsupported built-in call")
+        return none
+    }
+
+    name = callee[1]
+    if name == "print" {
+        v = eval_expr(functions, arg_nodes[0], env)
+        print(v)
+        return none
+    }
+    if name == "len" {
+        v = eval_expr(functions, arg_nodes[0], env)
+        return len(v)
+    }
+    if name == "error" {
+        v = eval_expr(functions, arg_nodes[0], env)
+        error(v)
+        return none
+    }
+    if name == "range" {
+        if len(arg_nodes) == 1 {
+            b = eval_expr(functions, arg_nodes[0], env)
+            return make_range(0, b)
+        }
+        a = eval_expr(functions, arg_nodes[0], env)
+        b = eval_expr(functions, arg_nodes[1], env)
+        return make_range(a, b)
+    }
+
+    fn_entry = find_function(functions, name)
+    if fn_entry == none {
+        error("visitor: unknown function " + name)
+    }
+    arg_values = eval_args(functions, arg_nodes, env)
+    return call_user_function(functions, fn_entry, arg_values)
+}
+
+# ---- statements ----
+# Every exec_* returns [signal, value, env] — signal is "normal",
+# "break", "continue", or "return".
+
+def exec_block(functions, statements, env) {
+    signal = "normal"
+    value = none
+    for stmt in statements {
+        if signal == "normal" {
+            result = exec_stmt(functions, stmt, env)
+            signal = result[0]
+            value = result[1]
+            env = result[2]
+        }
+    }
+    return [signal, value, env]
+}
+
+def exec_stmt(functions, node, env) {
+    tag = node[0]
+    if tag == "Assign" {
+        val = eval_expr(functions, node[2], env)
+        return ["normal", none, env_set(env, node[1], val)]
+    }
+    if tag == "ExprStmt" {
+        eval_expr(functions, node[1], env)
+        return ["normal", none, env]
+    }
+    if tag == "Return" {
+        if node[1] == none {
+            return ["return", none, env]
+        }
+        return ["return", eval_expr(functions, node[1], env), env]
+    }
+    if tag == "Break" {
+        return ["break", none, env]
+    }
+    if tag == "Continue" {
+        return ["continue", none, env]
+    }
+    if tag == "If" {
+        return exec_if(functions, node, env)
+    }
+    if tag == "While" {
+        return exec_while(functions, node, env)
+    }
+    if tag == "For" {
+        return exec_for(functions, node, env)
+    }
+    if tag == "FuncDef" {
+        return ["normal", none, env]
+    }
+    error("visitor: unknown statement")
+    return ["normal", none, env]
+}
+
+def exec_if(functions, node, env) {
+    branches = node[1]
+    else_body = node[2]
+    for branch in branches {
+        if truthy(eval_expr(functions, branch[0], env)) {
+            return exec_block(functions, branch[1], env)
+        }
+    }
+    if else_body != none {
+        return exec_block(functions, else_body, env)
+    }
+    return ["normal", none, env]
+}
+
+def exec_while(functions, node, env) {
+    cond = node[1]
+    body = node[2]
+    looping = true
+    while looping {
+        if truthy(eval_expr(functions, cond, env)) == false {
+            looping = false
+        } else {
+            result = exec_block(functions, body, env)
+            env = result[2]
+            if result[0] == "break" {
+                looping = false
+            } elif result[0] == "return" {
+                return result
+            }
+        }
+    }
+    return ["normal", none, env]
+}
+
+def exec_for(functions, node, env) {
+    var_name = node[1]
+    items = eval_expr(functions, node[2], env)
+    body = node[3]
+    i = 0
+    n = len(items)
+    looping = true
+    while i < n and looping {
+        env = env_set(env, var_name, items[i])
+        result = exec_block(functions, body, env)
+        env = result[2]
+        if result[0] == "break" {
+            looping = false
+        } elif result[0] == "return" {
+            return result
+        }
+        i = i + 1
+    }
+    return ["normal", none, env]
+}
+
+# ---- entry point ----
+
+def collect_functions(statements) {
+    functions = []
+    for stmt in statements {
+        if stmt[0] == "FuncDef" {
+            functions = functions + [[stmt[1], [stmt[2], stmt[3]]]]
+        }
+    }
+    return functions
+}
+
+def non_funcdefs(statements) {
+    result = []
+    for stmt in statements {
+        if stmt[0] != "FuncDef" {
+            result = result + [stmt]
+        }
+    }
+    return result
+}
+
+def interpret(ast) {
+    statements = ast[1]
+    functions = collect_functions(statements)
+    exec_block(functions, non_funcdefs(statements), [])
+}
