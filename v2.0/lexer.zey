@@ -1,1 +1,197 @@
+# ZeyLang v2.0 — self-hosted Lexer (subset, written IN ZeyLang)
+#
+# Tokens are 2-element lists: [type, value] — both strings.
+# No line/column tracking (kept out for this subset).
+#
+# ZeyLang has no dict/set, so character classification (is_digit,
+# is_alpha, ...) is written as an explicit membership loop over a
+# list literal instead of a lookup table.
 
+def is_digit(ch) {
+    digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+    for d in digits {
+        if ch == d {
+            return true
+        }
+    }
+    return false
+}
+
+def is_alpha(ch) {
+    letters = [
+        "a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
+        "n", "o", "p", "q", "r", "s", "t", "u", "v", "w", "x", "y", "z",
+        "A", "B", "C", "D", "E", "F", "G", "H", "I", "J", "K", "L", "M",
+        "N", "O", "P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z",
+        "_"
+    ]
+    for l in letters {
+        if ch == l {
+            return true
+        }
+    }
+    return false
+}
+
+def is_alnum(ch) {
+    if is_alpha(ch) {
+        return true
+    }
+    return is_digit(ch)
+}
+
+def is_space(ch) {
+    spaces = [" ", "\t", "\n", "\r"]
+    for s in spaces {
+        if ch == s {
+            return true
+        }
+    }
+    return false
+}
+
+def keyword_type(word) {
+    if word == "def" { return "DEF" }
+    if word == "if" { return "IF" }
+    if word == "elif" { return "ELIF" }
+    if word == "else" { return "ELSE" }
+    if word == "while" { return "WHILE" }
+    if word == "for" { return "FOR" }
+    if word == "in" { return "IN" }
+    if word == "return" { return "RETURN" }
+    if word == "break" { return "BREAK" }
+    if word == "continue" { return "CONTINUE" }
+    if word == "and" { return "AND" }
+    if word == "or" { return "OR" }
+    if word == "not" { return "NOT" }
+    if word == "true" { return "BOOL" }
+    if word == "false" { return "BOOL" }
+    if word == "none" { return "NONE" }
+    return "IDENTIFIER"
+}
+
+def read_string(source, pos, n) {
+    pos = pos + 1
+    value = ""
+    while pos < n and source[pos] != "\"" {
+        c = source[pos]
+        if c == "\\" and pos + 1 < n {
+            nc = source[pos + 1]
+            if nc == "n" {
+                value = value + "\n"
+            } elif nc == "t" {
+                value = value + "\t"
+            } elif nc == "r" {
+                value = value + "\r"
+            } elif nc == "\"" {
+                value = value + "\""
+            } elif nc == "\\" {
+                value = value + "\\"
+            } else {
+                value = value + nc
+            }
+            pos = pos + 2
+        } else {
+            value = value + c
+            pos = pos + 1
+        }
+    }
+    pos = pos + 1
+    return [value, pos]
+}
+
+def tokenize(source) {
+    tokens = []
+    pos = 0
+    n = len(source)
+    while pos < n {
+        ch = source[pos]
+
+        if is_space(ch) {
+            pos = pos + 1
+        } elif ch == "#" {
+            while pos < n and source[pos] != "\n" {
+                pos = pos + 1
+            }
+        } elif ch == "\"" {
+            result = read_string(source, pos, n)
+            tokens = tokens + [["STRING", result[0]]]
+            pos = result[1]
+        } elif is_digit(ch) {
+            value = ""
+            while pos < n and (is_digit(source[pos]) or source[pos] == ".") {
+                value = value + source[pos]
+                pos = pos + 1
+            }
+            tokens = tokens + [["NUMBER", value]]
+        } elif is_alpha(ch) {
+            value = ""
+            while pos < n and is_alnum(source[pos]) {
+                value = value + source[pos]
+                pos = pos + 1
+            }
+            tokens = tokens + [[keyword_type(value), value]]
+        } elif ch == "=" and pos + 1 < n and source[pos + 1] == "=" {
+            tokens = tokens + [["EQ", "=="]]
+            pos = pos + 2
+        } elif ch == "!" and pos + 1 < n and source[pos + 1] == "=" {
+            tokens = tokens + [["NEQ", "!="]]
+            pos = pos + 2
+        } elif ch == "<" and pos + 1 < n and source[pos + 1] == "=" {
+            tokens = tokens + [["LE", "<="]]
+            pos = pos + 2
+        } elif ch == ">" and pos + 1 < n and source[pos + 1] == "=" {
+            tokens = tokens + [["GE", ">="]]
+            pos = pos + 2
+        } elif ch == "=" {
+            tokens = tokens + [["ASSIGN", "="]]
+            pos = pos + 1
+        } elif ch == "<" {
+            tokens = tokens + [["LT", "<"]]
+            pos = pos + 1
+        } elif ch == ">" {
+            tokens = tokens + [["GT", ">"]]
+            pos = pos + 1
+        } elif ch == "+" {
+            tokens = tokens + [["PLUS", "+"]]
+            pos = pos + 1
+        } elif ch == "-" {
+            tokens = tokens + [["MINUS", "-"]]
+            pos = pos + 1
+        } elif ch == "*" {
+            tokens = tokens + [["STAR", "*"]]
+            pos = pos + 1
+        } elif ch == "/" {
+            tokens = tokens + [["SLASH", "/"]]
+            pos = pos + 1
+        } elif ch == "(" {
+            tokens = tokens + [["LPAREN", "("]]
+            pos = pos + 1
+        } elif ch == ")" {
+            tokens = tokens + [["RPAREN", ")"]]
+            pos = pos + 1
+        } elif ch == "{" {
+            tokens = tokens + [["LBRACE", "{"]]
+            pos = pos + 1
+        } elif ch == "}" {
+            tokens = tokens + [["RBRACE", "}"]]
+            pos = pos + 1
+        } elif ch == "[" {
+            tokens = tokens + [["LBRACK", "["]]
+            pos = pos + 1
+        } elif ch == "]" {
+            tokens = tokens + [["RBRACK", "]"]]
+            pos = pos + 1
+        } elif ch == "," {
+            tokens = tokens + [["COMMA", ","]]
+            pos = pos + 1
+        } elif ch == "@" {
+            tokens = tokens + [["AT", "@"]]
+            pos = pos + 1
+        } else {
+            error("lexer: unexpected character")
+        }
+    }
+    tokens = tokens + [["EOF", ""]]
+    return tokens
+}
