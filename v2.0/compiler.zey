@@ -1,0 +1,425 @@
+# ZeyLang v2.0 — self-hosted Compiler, ZeyLang -> C (subset, written IN ZeyLang)
+#
+# Mirrors zeylang_compiler.py's architecture (tagged ZVal struct,
+# expr-as-C-expression / stmt-as-C-text generation) but the runtime it
+# emits is a deliberately minimal subset: variables, arithmetic,
+# comparisons, if/while/for, functions+recursion, lists+indexing,
+# string indexing/len, print, and two representative built-ins
+# (ai@chat, robot@walk) — enough to prove the self-hosting concept,
+# not full v1.0 parity. Build the output with plain `gcc` (uses the
+# statement-expression GCC extension for list literals and and/or,
+# same as v1.0's compiler).
+#
+# C_RUNTIME below is fixed text, escaped into a ZeyLang string (in a
+# few concatenated pieces for readability) — ZeyLang has no raw
+# multi-line string literal, so every line break is an explicit \n.
+#
+# No keyword arguments and no `ai@config`-style calls in this subset's
+# parser, so the compiler doesn't need to handle them either.
+
+C_RUNTIME = "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\ntypedef enum { ZNONE, ZBOOL, ZNUM, ZSTR, ZLIST } ZTag;\ntypedef struct ZVal ZVal;\ntypedef struct ZList { ZVal *items; int count; int cap; } ZList;\nstruct ZVal { ZTag tag; union { int b; double n; const char *s; ZList *list; } as; };\nstatic ZVal znone(void){ ZVal v; v.tag=ZNONE; return v; }\nstatic ZVal zbool(int b){ ZVal v; v.tag=ZBOOL; v.as.b=b; return v; }\nstatic ZVal znum(double n){ ZVal v; v.tag=ZNUM; v.as.n=n; return v; }\nstatic ZVal zstr(const char *s){ ZVal v; v.tag=ZSTR; v.as.s=s; return v; }\nstatic void zerr(const char *m){ fprintf(stderr, \"[Runtime] %s\\n\", m); exit(1); }\nstatic ZVal zlistnew(void){ ZVal v; v.tag=ZLIST; v.as.list=(ZList*)malloc(sizeof(ZList)); v.as.list->items=NULL; v.as.list->count=0; v.as.list->cap=0; return v; }\nstatic void zpush(ZVal l, ZVal item){ ZList *L=l.as.list; if(L->count>=L->ca"
+C_RUNTIME = C_RUNTIME + "p){ L->cap=L->cap?L->cap*2:4; L->items=(ZVal*)realloc(L->items,sizeof(ZVal)*L->cap);} L->items[L->count++]=item; }\nstatic ZVal zindex(ZVal obj, ZVal idx){\n  int i=(int)idx.as.n;\n  if(obj.tag==ZLIST){ if(i<0) i+=obj.as.list->count; if(i<0||i>=obj.as.list->count) zerr(\"index out of range\"); return obj.as.list->items[i]; }\n  if(obj.tag==ZSTR){ int sl=(int)strlen(obj.as.s); if(i<0) i+=sl; if(i<0||i>=sl) zerr(\"index out of range\"); char *b=(char*)malloc(2); b[0]=obj.as.s[i]; b[1]=0; return zstr(b); }\n  zerr(\"not subscriptable\"); return znone();\n}\nstatic ZVal zlen(ZVal v){ if(v.tag==ZSTR) return znum((double)strlen(v.as.s)); if(v.tag==ZLIST) return znum((double)v.as.list->count); zerr(\"len() needs str/list\"); return znone(); }\nstatic int ztruthy(ZVal v){ if(v.tag==ZNONE) return 0; if(v.tag==ZBOOL) return v.as.b; if(v.tag==ZNUM) return v.as.n!=0; if(v.tag==ZSTR) return v.as.s[0]"
+C_RUNTIME = C_RUNTIME + "!=0; if(v.tag==ZLIST) return v.as.list->count>0; return 0; }\nstatic void zprintval(ZVal v){\n  if(v.tag==ZNONE) printf(\"None\");\n  else if(v.tag==ZBOOL) printf(v.as.b?\"True\":\"False\");\n  else if(v.tag==ZNUM){ if(v.as.n==(long long)v.as.n) printf(\"%lld\",(long long)v.as.n); else printf(\"%g\", v.as.n); }\n  else if(v.tag==ZSTR) printf(\"%s\", v.as.s);\n  else if(v.tag==ZLIST){ printf(\"[\"); for(int i=0;i<v.as.list->count;i++){ if(i) printf(\", \"); zprintval(v.as.list->items[i]); } printf(\"]\"); }\n}\nstatic ZVal zprint(ZVal v){ zprintval(v); printf(\"\\n\"); return znone(); }\nstatic ZVal zadd(ZVal a, ZVal b){\n  if(a.tag==ZNUM&&b.tag==ZNUM) return znum(a.as.n+b.as.n);\n  if(a.tag==ZSTR&&b.tag==ZSTR){ size_t l=strlen(a.as.s)+strlen(b.as.s)+1; char*buf=(char*)malloc(l); snprintf(buf,l,\"%s%s\",a.as.s,b.as.s); return zstr(buf); }\n  if(a.tag==ZLIST&&b.tag==ZLIST){ ZVal r=zlistnew"
+C_RUNTIME = C_RUNTIME + "(); for(int i=0;i<a.as.list->count;i++) zpush(r,a.as.list->items[i]); for(int i=0;i<b.as.list->count;i++) zpush(r,b.as.list->items[i]); return r; }\n  zerr(\"bad + operands\"); return znone();\n}\nstatic ZVal zsub(ZVal a, ZVal b){ if(a.tag==ZNUM&&b.tag==ZNUM) return znum(a.as.n-b.as.n); zerr(\"bad - operands\"); return znone(); }\nstatic ZVal zmul(ZVal a, ZVal b){ if(a.tag==ZNUM&&b.tag==ZNUM) return znum(a.as.n*b.as.n); zerr(\"bad * operands\"); return znone(); }\nstatic ZVal zdiv(ZVal a, ZVal b){ if(a.tag==ZNUM&&b.tag==ZNUM){ if(b.as.n==0) zerr(\"division by zero\"); return znum(a.as.n/b.as.n);} zerr(\"bad / operands\"); return znone(); }\nstatic int zeqv(ZVal a, ZVal b){\n  if(a.tag!=b.tag) return 0;\n  if(a.tag==ZNONE) return 1;\n  if(a.tag==ZBOOL) return a.as.b==b.as.b;\n  if(a.tag==ZNUM) return a.as.n==b.as.n;\n  if(a.tag==ZSTR) return strcmp(a.as.s,b.as.s)==0;\n  return 0;\n}\nstat"
+C_RUNTIME = C_RUNTIME + "ic ZVal zeq(ZVal a, ZVal b){ return zbool(zeqv(a,b)); }\nstatic ZVal zneq(ZVal a, ZVal b){ return zbool(!zeqv(a,b)); }\nstatic ZVal zlt(ZVal a, ZVal b){ if(a.tag==ZNUM&&b.tag==ZNUM) return zbool(a.as.n<b.as.n); if(a.tag==ZSTR&&b.tag==ZSTR) return zbool(strcmp(a.as.s,b.as.s)<0); zerr(\"bad < operands\"); return znone(); }\nstatic ZVal zgt(ZVal a, ZVal b){ if(a.tag==ZNUM&&b.tag==ZNUM) return zbool(a.as.n>b.as.n); if(a.tag==ZSTR&&b.tag==ZSTR) return zbool(strcmp(a.as.s,b.as.s)>0); zerr(\"bad > operands\"); return znone(); }\nstatic ZVal zle(ZVal a, ZVal b){ if(a.tag==ZNUM&&b.tag==ZNUM) return zbool(a.as.n<=b.as.n); if(a.tag==ZSTR&&b.tag==ZSTR) return zbool(strcmp(a.as.s,b.as.s)<=0); zerr(\"bad <= operands\"); return znone(); }\nstatic ZVal zge(ZVal a, ZVal b){ if(a.tag==ZNUM&&b.tag==ZNUM) return zbool(a.as.n>=b.as.n); if(a.tag==ZSTR&&b.tag==ZSTR) return zbool(strcmp(a.as.s,b.as.s)>=0); zerr"
+C_RUNTIME = C_RUNTIME + "(\"bad >= operands\"); return znone(); }\nstatic ZVal zneg(ZVal a){ if(a.tag==ZNUM) return znum(-a.as.n); zerr(\"bad unary -\"); return znone(); }\nstatic ZVal znotv(ZVal a){ return zbool(!ztruthy(a)); }\nstatic ZVal zai_chat(ZVal m){ printf(\"[ai@chat] \"); zprintval(m); printf(\"\\n\"); return m; }\nstatic ZVal zrobot_walk(ZVal s){ printf(\"[robot@walk] walking\\n\"); return s; }\nstatic ZVal zerrdyn(ZVal v){ zerr(v.as.s); return znone(); }\n#define ZAND(a,b) ({ ZVal _t=(a); ztruthy(_t)?(b):_t; })\n#define ZOR(a,b) ({ ZVal _t=(a); ztruthy(_t)?_t:(b); })\n"
+# error(msg) -> zerrdyn(msg) — Part-8-style: lets compiled ZeyLang code
+# halt with its own message. Added because lexer.zey (a real, non-toy
+# consumer of this subset) turned out to call error() itself for its
+# unrecognized-character case, caught by trying to self-compile it.
+
+# ---- string helpers (no host string-escaping/number-formatting
+# primitive exists, so these are written using only what ZeyLang has:
+# indexing, len, +, and NumLit's preserved original token text) ----
+
+def c_escape_char(ch) {
+    if ch == "\\" { return "\\\\" }
+    if ch == "\"" { return "\\\"" }
+    if ch == "\n" { return "\\n" }
+    if ch == "\t" { return "\\t" }
+    if ch == "\r" { return "\\r" }
+    return ch
+}
+
+def c_string_literal(s) {
+    result = "\""
+    n = len(s)
+    i = 0
+    while i < n {
+        result = result + c_escape_char(s[i])
+        i = i + 1
+    }
+    result = result + "\""
+    return result
+}
+
+def contains_name(names, name) {
+    for x in names {
+        if x == name {
+            return true
+        }
+    }
+    return false
+}
+
+def function_arity(arities, name) {
+    for pair in arities {
+        if pair[0] == name {
+            return pair[1]
+        }
+    }
+    return none
+}
+
+# ---- expressions ----
+
+def compile_list_literal(arities, elements) {
+    result = "({ ZVal _lt = zlistnew()"
+    for el in elements {
+        result = result + "; zpush(_lt, " + compile_expr(arities, el) + ")"
+    }
+    result = result + "; _lt; })"
+    return result
+}
+
+def compile_binop(arities, node) {
+    op = node[1]
+    l = compile_expr(arities, node[2])
+    r = compile_expr(arities, node[3])
+    if op == "and" { return "ZAND(" + l + ", " + r + ")" }
+    if op == "or" { return "ZOR(" + l + ", " + r + ")" }
+    if op == "+" { return "zadd(" + l + ", " + r + ")" }
+    if op == "-" { return "zsub(" + l + ", " + r + ")" }
+    if op == "*" { return "zmul(" + l + ", " + r + ")" }
+    if op == "/" { return "zdiv(" + l + ", " + r + ")" }
+    if op == "==" { return "zeq(" + l + ", " + r + ")" }
+    if op == "!=" { return "zneq(" + l + ", " + r + ")" }
+    if op == "<" { return "zlt(" + l + ", " + r + ")" }
+    if op == ">" { return "zgt(" + l + ", " + r + ")" }
+    if op == "<=" { return "zle(" + l + ", " + r + ")" }
+    if op == ">=" { return "zge(" + l + ", " + r + ")" }
+    error("compiler: unsupported operator")
+    return ""
+}
+
+def compile_unaryop(arities, node) {
+    op = node[1]
+    v = compile_expr(arities, node[2])
+    if op == "-" { return "zneg(" + v + ")" }
+    if op == "not" { return "znotv(" + v + ")" }
+    error("compiler: unsupported unary operator")
+    return ""
+}
+
+def compile_call_args(arities, arg_nodes) {
+    result = ""
+    n = len(arg_nodes)
+    i = 0
+    while i < n {
+        result = result + compile_expr(arities, arg_nodes[i])
+        if i < n - 1 {
+            result = result + ", "
+        }
+        i = i + 1
+    }
+    return result
+}
+
+def compile_call(arities, node) {
+    callee = node[1]
+    arg_nodes = node[2]
+
+    if callee[0] == "Attribute" {
+        ns = callee[1][1]
+        method = callee[2]
+        if ns == "ai" and method == "chat" {
+            return "zai_chat(" + compile_expr(arities, arg_nodes[0]) + ")"
+        }
+        if ns == "robot" and method == "walk" {
+            return "zrobot_walk(" + compile_expr(arities, arg_nodes[0]) + ")"
+        }
+        error("compiler: unsupported built-in call")
+        return ""
+    }
+
+    name = callee[1]
+    if name == "print" {
+        return "zprint(" + compile_expr(arities, arg_nodes[0]) + ")"
+    }
+    if name == "len" {
+        return "zlen(" + compile_expr(arities, arg_nodes[0]) + ")"
+    }
+    if name == "error" {
+        return "zerrdyn(" + compile_expr(arities, arg_nodes[0]) + ")"
+    }
+    if name == "range" {
+        error("compiler: range() only supported directly inside for-in")
+        return ""
+    }
+    if function_arity(arities, name) != none {
+        return "zfn_" + name + "(" + compile_call_args(arities, arg_nodes) + ")"
+    }
+    error("compiler: call to unknown function")
+    return ""
+}
+
+def compile_expr(arities, node) {
+    tag = node[0]
+    if tag == "NumLit" {
+        return "znum(" + node[2] + ")"
+    }
+    if tag == "StrLit" {
+        return "zstr(" + c_string_literal(node[1]) + ")"
+    }
+    if tag == "BoolLit" {
+        if node[1] {
+            return "zbool(1)"
+        }
+        return "zbool(0)"
+    }
+    if tag == "NoneLit" {
+        return "znone()"
+    }
+    if tag == "Identifier" {
+        return "zv_" + node[1]
+    }
+    if tag == "ListLiteral" {
+        return compile_list_literal(arities, node[1])
+    }
+    if tag == "BinOp" {
+        return compile_binop(arities, node)
+    }
+    if tag == "UnaryOp" {
+        return compile_unaryop(arities, node)
+    }
+    if tag == "Call" {
+        return compile_call(arities, node)
+    }
+    if tag == "Index" {
+        return "zindex(" + compile_expr(arities, node[1]) + ", " + compile_expr(arities, node[2]) + ")"
+    }
+    error("compiler: unsupported expression")
+    return ""
+}
+
+# ---- statements ----
+
+def compile_block(arities, statements, indent) {
+    result = ""
+    for stmt in statements {
+        result = result + compile_stmt(arities, stmt, indent)
+    }
+    return result
+}
+
+def compile_if(arities, node, indent) {
+    branches = node[1]
+    else_body = node[2]
+    result = ""
+    i = 0
+    n = len(branches)
+    while i < n {
+        branch = branches[i]
+        if i == 0 {
+            result = result + indent + "if (ztruthy(" + compile_expr(arities, branch[0]) + ")) {\n"
+        } else {
+            result = result + indent + "} else if (ztruthy(" + compile_expr(arities, branch[0]) + ")) {\n"
+        }
+        result = result + compile_block(arities, branch[1], indent + "    ")
+        i = i + 1
+    }
+    if else_body != none {
+        result = result + indent + "} else {\n"
+        result = result + compile_block(arities, else_body, indent + "    ")
+    }
+    result = result + indent + "}\n"
+    return result
+}
+
+def compile_while(arities, node, indent) {
+    result = indent + "while (ztruthy(" + compile_expr(arities, node[1]) + ")) {\n"
+    result = result + compile_block(arities, node[2], indent + "    ")
+    result = result + indent + "}\n"
+    return result
+}
+
+def compile_for(arities, node, indent) {
+    var_name = node[1]
+    iterable = node[2]
+    body = node[3]
+    is_range = false
+    if iterable[0] == "Call" {
+        if iterable[1][0] == "Identifier" {
+            if iterable[1][1] == "range" {
+                is_range = true
+            }
+        }
+    }
+    if is_range {
+        range_args = iterable[2]
+        if len(range_args) == 1 {
+            start_c = "0.0"
+            stop_c = "(" + compile_expr(arities, range_args[0]) + ").as.n"
+        } else {
+            start_c = "(" + compile_expr(arities, range_args[0]) + ").as.n"
+            stop_c = "(" + compile_expr(arities, range_args[1]) + ").as.n"
+        }
+        result = indent + "for (double _i = " + start_c + "; _i < " + stop_c + "; _i += 1.0) {\n"
+        result = result + indent + "    zv_" + var_name + " = znum(_i);\n"
+        result = result + compile_block(arities, body, indent + "    ")
+        result = result + indent + "}\n"
+        return result
+    }
+    result = indent + "{\n"
+    result = result + indent + "    ZVal _it = " + compile_expr(arities, iterable) + ";\n"
+    result = result + indent + "    for (int _i = 0; _i < _it.as.list->count; _i++) {\n"
+    result = result + indent + "        zv_" + var_name + " = _it.as.list->items[_i];\n"
+    result = result + compile_block(arities, body, indent + "        ")
+    result = result + indent + "    }\n"
+    result = result + indent + "}\n"
+    return result
+}
+
+def compile_stmt(arities, node, indent) {
+    tag = node[0]
+    if tag == "Assign" {
+        return indent + "zv_" + node[1] + " = " + compile_expr(arities, node[2]) + ";\n"
+    }
+    if tag == "ExprStmt" {
+        return indent + compile_expr(arities, node[1]) + ";\n"
+    }
+    if tag == "Return" {
+        if node[1] == none {
+            return indent + "return znone();\n"
+        }
+        return indent + "return " + compile_expr(arities, node[1]) + ";\n"
+    }
+    if tag == "Break" {
+        return indent + "break;\n"
+    }
+    if tag == "Continue" {
+        return indent + "continue;\n"
+    }
+    if tag == "If" {
+        return compile_if(arities, node, indent)
+    }
+    if tag == "While" {
+        return compile_while(arities, node, indent)
+    }
+    if tag == "For" {
+        return compile_for(arities, node, indent)
+    }
+    error("compiler: unsupported statement")
+    return ""
+}
+
+# ---- top level ----
+
+def collect_locals(statements, existing) {
+    names = existing
+    for stmt in statements {
+        tag = stmt[0]
+        if tag == "Assign" {
+            if contains_name(names, stmt[1]) == false {
+                names = names + [stmt[1]]
+            }
+        } elif tag == "For" {
+            if contains_name(names, stmt[1]) == false {
+                names = names + [stmt[1]]
+            }
+            names = collect_locals(stmt[3], names)
+        } elif tag == "If" {
+            for branch in stmt[1] {
+                names = collect_locals(branch[1], names)
+            }
+            if stmt[2] != none {
+                names = collect_locals(stmt[2], names)
+            }
+        } elif tag == "While" {
+            names = collect_locals(stmt[2], names)
+        }
+    }
+    return names
+}
+
+def compile_signature(node) {
+    name = node[1]
+    params = node[2]
+    header = "static ZVal zfn_" + name + "("
+    n = len(params)
+    if n == 0 {
+        header = header + "void"
+    } else {
+        i = 0
+        while i < n {
+            header = header + "ZVal zv_" + params[i]
+            if i < n - 1 {
+                header = header + ", "
+            }
+            i = i + 1
+        }
+    }
+    header = header + ")"
+    return header
+}
+
+def compile_prototype(node) {
+    return compile_signature(node) + ";\n"
+}
+
+def compile_funcdef(arities, node) {
+    body = node[3]
+    params = node[2]
+    header = compile_signature(node) + " {\n"
+    locals = collect_locals(body, params)
+    decls = ""
+    for name in locals {
+        if contains_name(params, name) == false {
+            decls = decls + "    ZVal zv_" + name + " = znone();\n"
+        }
+    }
+    body_c = compile_block(arities, body, "    ")
+    return header + decls + body_c + "    return znone();\n}\n"
+}
+
+def compile_main(arities, statements) {
+    locals = collect_locals(statements, [])
+    decls = ""
+    for name in locals {
+        decls = decls + "    ZVal zv_" + name + " = znone();\n"
+    }
+    body_c = compile_block(arities, statements, "    ")
+    return "int main(void) {\n" + decls + body_c + "    return 0;\n}\n"
+}
+
+def function_names_and_arities(statements) {
+    result = []
+    for stmt in statements {
+        if stmt[0] == "FuncDef" {
+            result = result + [[stmt[1], len(stmt[2])]]
+        }
+    }
+    return result
+}
+
+def compile_program(ast) {
+    statements = ast[1]
+    arities = function_names_and_arities(statements)
+    funcs = []
+    mains = []
+    for stmt in statements {
+        if stmt[0] == "FuncDef" {
+            funcs = funcs + [stmt]
+        } else {
+            mains = mains + [stmt]
+        }
+    }
+    protos = ""
+    bodies = ""
+    for f in funcs {
+        protos = protos + compile_prototype(f)
+        bodies = bodies + compile_funcdef(arities, f)
+    }
+    main_c = compile_main(arities, mains)
+    return C_RUNTIME + "\n" + protos + "\n" + bodies + main_c
+}
