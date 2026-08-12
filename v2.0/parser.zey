@@ -1,0 +1,411 @@
+# ZeyLang v2.0 — self-hosted Parser (subset, written IN ZeyLang)
+#
+# Consumes tokens from lexer.zey ([type, value] pairs). AST nodes are
+# tagged lists: first element is a string tag, rest are the fields —
+# e.g. ["BinOp", "+", left, right], ["NumLit", 5], ["If", branches,
+# else_body]. ZeyLang has no class/struct, so this is the natural
+# stand-in (the classic technique for ASTs in languages without
+# algebraic data types).
+#
+# Literals get their own tag per kind (NumLit/StrLit/BoolLit/NoneLit)
+# rather than one generic Literal — ZeyLang has no way to inspect a
+# value's type at runtime, so compiler.zey (which needs to know a
+# literal's type to emit the right C constructor) can only tell them
+# apart if the AST already says which kind it is.
+#
+# Every parse_* function takes (tokens, pos) and returns [node, new_pos]
+# (or [list_of_things, new_pos]) — ZeyLang has no multi-return, so the
+# updated position is threaded through explicitly as part of the result,
+# the same way an interpreter without mutation has to thread state.
+#
+# Subset: no keyword arguments (ai@config(key=...) isn't parseable by
+# this subset parser — only positional calls), no elif chain length
+# limit, bare `return` (no value) only recognized before `}` or EOF.
+
+def tok_type(tokens, pos) {
+    return tokens[pos][0]
+}
+
+def tok_value(tokens, pos) {
+    return tokens[pos][1]
+}
+
+def expect(tokens, pos, ttype) {
+    if tok_type(tokens, pos) != ttype {
+        error("parser: expected " + ttype)
+    }
+    return pos + 1
+}
+
+def digit_value(ch) {
+    if ch == "0" { return 0 }
+    if ch == "1" { return 1 }
+    if ch == "2" { return 2 }
+    if ch == "3" { return 3 }
+    if ch == "4" { return 4 }
+    if ch == "5" { return 5 }
+    if ch == "6" { return 6 }
+    if ch == "7" { return 7 }
+    if ch == "8" { return 8 }
+    if ch == "9" { return 9 }
+    return 0
+}
+
+# NUMBER tokens carry their raw text (e.g. "3.14") — parse_atom turns
+# that into an actual number itself, since ZeyLang has no built-in
+# string -> number conversion.
+def to_number(s) {
+    n = len(s)
+    i = 0
+    int_part = 0
+    while i < n and s[i] != "." {
+        int_part = int_part * 10 + digit_value(s[i])
+        i = i + 1
+    }
+    if i >= n {
+        return int_part
+    }
+    i = i + 1
+    frac_part = 0
+    frac_div = 1
+    while i < n {
+        frac_part = frac_part * 10 + digit_value(s[i])
+        frac_div = frac_div * 10
+        i = i + 1
+    }
+    return int_part + (frac_part / frac_div)
+}
+
+def parse(tokens) {
+    statements = []
+    pos = 0
+    while tok_type(tokens, pos) != "EOF" {
+        result = parse_statement(tokens, pos)
+        statements = statements + [result[0]]
+        pos = result[1]
+    }
+    return ["Program", statements]
+}
+
+def parse_statement(tokens, pos) {
+    t = tok_type(tokens, pos)
+    if t == "IF" {
+        return parse_if(tokens, pos)
+    }
+    if t == "WHILE" {
+        return parse_while(tokens, pos)
+    }
+    if t == "FOR" {
+        return parse_for(tokens, pos)
+    }
+    if t == "DEF" {
+        return parse_funcdef(tokens, pos)
+    }
+    return parse_simple_stmt(tokens, pos)
+}
+
+def parse_simple_stmt(tokens, pos) {
+    t = tok_type(tokens, pos)
+    if t == "RETURN" {
+        pos = pos + 1
+        nt = tok_type(tokens, pos)
+        if nt == "RBRACE" or nt == "EOF" {
+            return [["Return", none], pos]
+        }
+        result = parse_expr(tokens, pos)
+        return [["Return", result[0]], result[1]]
+    }
+    if t == "BREAK" {
+        return [["Break"], pos + 1]
+    }
+    if t == "CONTINUE" {
+        return [["Continue"], pos + 1]
+    }
+    if t == "IDENTIFIER" and tok_type(tokens, pos + 1) == "ASSIGN" {
+        name = tok_value(tokens, pos)
+        pos = pos + 2
+        result = parse_expr(tokens, pos)
+        return [["Assign", name, result[0]], result[1]]
+    }
+    result = parse_expr(tokens, pos)
+    return [["ExprStmt", result[0]], result[1]]
+}
+
+def parse_block(tokens, pos) {
+    pos = expect(tokens, pos, "LBRACE")
+    statements = []
+    while tok_type(tokens, pos) != "RBRACE" {
+        result = parse_statement(tokens, pos)
+        statements = statements + [result[0]]
+        pos = result[1]
+    }
+    pos = expect(tokens, pos, "RBRACE")
+    return [statements, pos]
+}
+
+def parse_if(tokens, pos) {
+    pos = pos + 1
+    result = parse_expr(tokens, pos)
+    cond = result[0]
+    pos = result[1]
+    result = parse_block(tokens, pos)
+    branches = [[cond, result[0]]]
+    pos = result[1]
+    while tok_type(tokens, pos) == "ELIF" {
+        pos = pos + 1
+        result = parse_expr(tokens, pos)
+        cond2 = result[0]
+        pos = result[1]
+        result = parse_block(tokens, pos)
+        branches = branches + [[cond2, result[0]]]
+        pos = result[1]
+    }
+    else_body = none
+    if tok_type(tokens, pos) == "ELSE" {
+        pos = pos + 1
+        result = parse_block(tokens, pos)
+        else_body = result[0]
+        pos = result[1]
+    }
+    return [["If", branches, else_body], pos]
+}
+
+def parse_while(tokens, pos) {
+    pos = pos + 1
+    result = parse_expr(tokens, pos)
+    cond = result[0]
+    pos = result[1]
+    result = parse_block(tokens, pos)
+    return [["While", cond, result[0]], result[1]]
+}
+
+def parse_for(tokens, pos) {
+    pos = pos + 1
+    name = tok_value(tokens, pos)
+    pos = pos + 1
+    pos = expect(tokens, pos, "IN")
+    result = parse_expr(tokens, pos)
+    iterable = result[0]
+    pos = result[1]
+    result = parse_block(tokens, pos)
+    return [["For", name, iterable, result[0]], result[1]]
+}
+
+def parse_funcdef(tokens, pos) {
+    pos = pos + 1
+    name = tok_value(tokens, pos)
+    pos = pos + 1
+    pos = expect(tokens, pos, "LPAREN")
+    params = []
+    if tok_type(tokens, pos) != "RPAREN" {
+        params = params + [tok_value(tokens, pos)]
+        pos = pos + 1
+        while tok_type(tokens, pos) == "COMMA" {
+            pos = pos + 1
+            params = params + [tok_value(tokens, pos)]
+            pos = pos + 1
+        }
+    }
+    pos = expect(tokens, pos, "RPAREN")
+    result = parse_block(tokens, pos)
+    return [["FuncDef", name, params, result[0]], result[1]]
+}
+
+def parse_expr(tokens, pos) {
+    return parse_or(tokens, pos)
+}
+
+def parse_or(tokens, pos) {
+    result = parse_and(tokens, pos)
+    left = result[0]
+    pos = result[1]
+    while tok_type(tokens, pos) == "OR" {
+        pos = pos + 1
+        result = parse_and(tokens, pos)
+        left = ["BinOp", "or", left, result[0]]
+        pos = result[1]
+    }
+    return [left, pos]
+}
+
+def parse_and(tokens, pos) {
+    result = parse_not(tokens, pos)
+    left = result[0]
+    pos = result[1]
+    while tok_type(tokens, pos) == "AND" {
+        pos = pos + 1
+        result = parse_not(tokens, pos)
+        left = ["BinOp", "and", left, result[0]]
+        pos = result[1]
+    }
+    return [left, pos]
+}
+
+def parse_not(tokens, pos) {
+    if tok_type(tokens, pos) == "NOT" {
+        pos = pos + 1
+        result = parse_not(tokens, pos)
+        return [["UnaryOp", "not", result[0]], result[1]]
+    }
+    return parse_comp(tokens, pos)
+}
+
+def is_comp_op(t) {
+    ops = ["EQ", "NEQ", "LE", "GE", "LT", "GT"]
+    for o in ops {
+        if t == o {
+            return true
+        }
+    }
+    return false
+}
+
+def parse_comp(tokens, pos) {
+    result = parse_add(tokens, pos)
+    left = result[0]
+    pos = result[1]
+    while is_comp_op(tok_type(tokens, pos)) {
+        op = tok_value(tokens, pos)
+        pos = pos + 1
+        result = parse_add(tokens, pos)
+        left = ["BinOp", op, left, result[0]]
+        pos = result[1]
+    }
+    return [left, pos]
+}
+
+def parse_add(tokens, pos) {
+    result = parse_mul(tokens, pos)
+    left = result[0]
+    pos = result[1]
+    while tok_type(tokens, pos) == "PLUS" or tok_type(tokens, pos) == "MINUS" {
+        op = tok_value(tokens, pos)
+        pos = pos + 1
+        result = parse_mul(tokens, pos)
+        left = ["BinOp", op, left, result[0]]
+        pos = result[1]
+    }
+    return [left, pos]
+}
+
+def parse_mul(tokens, pos) {
+    result = parse_unary(tokens, pos)
+    left = result[0]
+    pos = result[1]
+    while tok_type(tokens, pos) == "STAR" or tok_type(tokens, pos) == "SLASH" {
+        op = tok_value(tokens, pos)
+        pos = pos + 1
+        result = parse_unary(tokens, pos)
+        left = ["BinOp", op, left, result[0]]
+        pos = result[1]
+    }
+    return [left, pos]
+}
+
+def parse_unary(tokens, pos) {
+    if tok_type(tokens, pos) == "MINUS" {
+        pos = pos + 1
+        result = parse_unary(tokens, pos)
+        return [["UnaryOp", "-", result[0]], result[1]]
+    }
+    return parse_call(tokens, pos)
+}
+
+def parse_call(tokens, pos) {
+    result = parse_atom(tokens, pos)
+    expr = result[0]
+    pos = result[1]
+    looping = true
+    while looping {
+        t = tok_type(tokens, pos)
+        if t == "AT" {
+            pos = pos + 1
+            name = tok_value(tokens, pos)
+            pos = pos + 1
+            expr = ["Attribute", expr, name]
+            if tok_type(tokens, pos) == "LPAREN" {
+                result = parse_args(tokens, pos)
+                expr = ["Call", expr, result[0]]
+                pos = result[1]
+            }
+        } elif t == "LPAREN" {
+            result = parse_args(tokens, pos)
+            expr = ["Call", expr, result[0]]
+            pos = result[1]
+        } elif t == "LBRACK" {
+            pos = pos + 1
+            result = parse_expr(tokens, pos)
+            expr = ["Index", expr, result[0]]
+            pos = expect(tokens, result[1], "RBRACK")
+        } else {
+            looping = false
+        }
+    }
+    return [expr, pos]
+}
+
+def parse_args(tokens, pos) {
+    pos = pos + 1
+    args = []
+    if tok_type(tokens, pos) != "RPAREN" {
+        result = parse_expr(tokens, pos)
+        args = args + [result[0]]
+        pos = result[1]
+        while tok_type(tokens, pos) == "COMMA" {
+            pos = pos + 1
+            result = parse_expr(tokens, pos)
+            args = args + [result[0]]
+            pos = result[1]
+        }
+    }
+    pos = expect(tokens, pos, "RPAREN")
+    return [args, pos]
+}
+
+def parse_atom(tokens, pos) {
+    t = tok_type(tokens, pos)
+    v = tok_value(tokens, pos)
+    if t == "NUMBER" {
+        return [["NumLit", to_number(v), v], pos + 1]
+    }
+    if t == "STRING" {
+        return [["StrLit", v], pos + 1]
+    }
+    if t == "BOOL" {
+        if v == "true" {
+            return [["BoolLit", true], pos + 1]
+        }
+        return [["BoolLit", false], pos + 1]
+    }
+    if t == "NONE" {
+        return [["NoneLit"], pos + 1]
+    }
+    if t == "IDENTIFIER" {
+        return [["Identifier", v], pos + 1]
+    }
+    if t == "LPAREN" {
+        pos = pos + 1
+        result = parse_expr(tokens, pos)
+        pos = expect(tokens, result[1], "RPAREN")
+        return [result[0], pos]
+    }
+    if t == "LBRACK" {
+        pos = pos + 1
+        elements = []
+        if tok_type(tokens, pos) != "RBRACK" {
+            result = parse_expr(tokens, pos)
+            elements = elements + [result[0]]
+            pos = result[1]
+            while tok_type(tokens, pos) == "COMMA" {
+                pos = pos + 1
+                result = parse_expr(tokens, pos)
+                elements = elements + [result[0]]
+                pos = result[1]
+            }
+        }
+        pos = expect(tokens, pos, "RBRACK")
+        return [["ListLiteral", elements], pos]
+    }
+    error("parser: unexpected token")
+    return [none, pos]
+}
