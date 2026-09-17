@@ -1,0 +1,21 @@
+## Bootstrap (v3.0, tanpa Python)
+
+`compiler.zey` adalah lexer+parser+compiler ZeyLang, ditulis dalam ZeyLang,
+yang bisa mengcompile dirinya sendiri jadi binary native.
+
+    # Generasi 1: pakai v1.0 (Python) sekali saja
+    python3 zeylang_compiler.py compiler.zey --build -o compiler_gen1.c
+    mv compiler_gen1 zeylang
+
+    # Generasi 2+: pakai binary, bukan Python lagi
+    ./zeylang compiler.zey zeylang2
+    ./zeylang2 compiler.zey zeylang3
+
+    # Buktikan fixed point:
+    sha256sum zeylang2.c zeylang3.c   # harus identik
+
+Untuk compile file ZeyLang lain: `./zeylang program.zey nama_output`.
+Subset yang didukung compiler.zey: variabel, if/elif/else, while, for
+(range atau list), fungsi + rekursi, list + indexing, operasi
+string/angka, `print/len/error/argv/read_file/write_file/run_command`,
+dan `ai@chat`/`robot@walk` (representative built-in — bukan 16 penuh).
