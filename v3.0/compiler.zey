@@ -1,0 +1,480 @@
+# ZeyLang v3.0 — "The Bootstrap": a self-hosted compiler that can
+# compile ITSELF into a standalone binary, then have THAT binary
+# compile the same source again, with no Python involved at that point.
+#
+# lexer.zey + parser.zey + compiler.zey from v2.0, concatenated into
+# one file (no `import` yet), plus a driver at the bottom that makes
+# this a real CLI compiler using v3.0's new primitives: argv(i),
+# read_file(path), write_file(path, text), run_command(cmd).
+#
+# Usage once compiled: ./binary <source.zey> <output_name>
+
+def is_digit(ch) {
+    digits = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]
+    for d in digits { if ch == d { return true } }
+    return false
+}
+
+def is_alpha(ch) {
+    letters = [
+        "a","b","c","d","e","f","g","h","i","j","k","l","m","n","o","p","q","r","s","t","u","v","w","x","y","z",
+        "A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","_"
+    ]
+    for l in letters { if ch == l { return true } }
+    return false
+}
+
+def is_alnum(ch) {
+    if is_alpha(ch) { return true }
+    return is_digit(ch)
+}
+
+def is_space(ch) {
+    spaces = [" ", "\t", "\n", "\r"]
+    for s in spaces { if ch == s { return true } }
+    return false
+}
+
+def keyword_type(word) {
+    if word == "def" { return "DEF" }
+    if word == "if" { return "IF" }
+    if word == "elif" { return "ELIF" }
+    if word == "else" { return "ELSE" }
+    if word == "while" { return "WHILE" }
+    if word == "for" { return "FOR" }
+    if word == "in" { return "IN" }
+    if word == "return" { return "RETURN" }
+    if word == "break" { return "BREAK" }
+    if word == "continue" { return "CONTINUE" }
+    if word == "and" { return "AND" }
+    if word == "or" { return "OR" }
+    if word == "not" { return "NOT" }
+    if word == "true" { return "BOOL" }
+    if word == "false" { return "BOOL" }
+    if word == "none" { return "NONE" }
+    return "IDENTIFIER"
+}
+
+def read_string_token(source, pos, n) {
+    pos = pos + 1
+    value = ""
+    while pos < n and source[pos] != "\"" {
+        c = source[pos]
+        if c == "\\" and pos + 1 < n {
+            nc = source[pos + 1]
+            if nc == "n" { value = value + "\n" }
+            elif nc == "t" { value = value + "\t" }
+            elif nc == "r" { value = value + "\r" }
+            elif nc == "\"" { value = value + "\"" }
+            elif nc == "\\" { value = value + "\\" }
+            else { value = value + nc }
+            pos = pos + 2
+        } else {
+            value = value + c
+            pos = pos + 1
+        }
+    }
+    pos = pos + 1
+    return [value, pos]
+}
+
+def tokenize(source) {
+    tokens = []
+    pos = 0
+    n = len(source)
+    while pos < n {
+        ch = source[pos]
+        if is_space(ch) { pos = pos + 1 }
+        elif ch == "#" { while pos < n and source[pos] != "\n" { pos = pos + 1 } }
+        elif ch == "\"" {
+            result = read_string_token(source, pos, n)
+            tokens = tokens + [["STRING", result[0]]]
+            pos = result[1]
+        } elif is_digit(ch) {
+            value = ""
+            while pos < n and (is_digit(source[pos]) or source[pos] == ".") {
+                value = value + source[pos]
+                pos = pos + 1
+            }
+            tokens = tokens + [["NUMBER", value]]
+        } elif is_alpha(ch) {
+            value = ""
+            while pos < n and is_alnum(source[pos]) {
+                value = value + source[pos]
+                pos = pos + 1
+            }
+            tokens = tokens + [[keyword_type(value), value]]
+        } elif ch == "=" and pos + 1 < n and source[pos + 1] == "=" {
+            tokens = tokens + [["EQ", "=="]]
+            pos = pos + 2
+        } elif ch == "!" and pos + 1 < n and source[pos + 1] == "=" { tokens = tokens + [["NEQ", "!="]]; pos = pos + 2 }
+        elif ch == "<" and pos + 1 < n and source[pos + 1] == "=" { tokens = tokens + [["LE", "<="]]; pos = pos + 2 }
+        elif ch == ">" and pos + 1 < n and source[pos + 1] == "=" { tokens = tokens + [["GE", ">="]]; pos = pos + 2 }
+        elif ch == "=" { tokens = tokens + [["ASSIGN", "="]]; pos = pos + 1 }
+        elif ch == "<" { tokens = tokens + [["LT", "<"]]; pos = pos + 1 }
+        elif ch == ">" { tokens = tokens + [["GT", ">"]]; pos = pos + 1 }
+        elif ch == "+" { tokens = tokens + [["PLUS", "+"]]; pos = pos + 1 }
+        elif ch == "-" { tokens = tokens + [["MINUS", "-"]]; pos = pos + 1 }
+        elif ch == "*" { tokens = tokens + [["STAR", "*"]]; pos = pos + 1 }
+        elif ch == "/" { tokens = tokens + [["SLASH", "/"]]; pos = pos + 1 }
+        elif ch == "(" { tokens = tokens + [["LPAREN", "("]]; pos = pos + 1 }
+        elif ch == ")" { tokens = tokens + [["RPAREN", ")"]]; pos = pos + 1 }
+        elif ch == "{" { tokens = tokens + [["LBRACE", "{"]]; pos = pos + 1 }
+        elif ch == "}" { tokens = tokens + [["RBRACE", "}"]]; pos = pos + 1 }
+        elif ch == "[" { tokens = tokens + [["LBRACK", "["]]; pos = pos + 1 }
+        elif ch == "]" { tokens = tokens + [["RBRACK", "]"]]; pos = pos + 1 }
+        elif ch == "," { tokens = tokens + [["COMMA", ","]]; pos = pos + 1 }
+        elif ch == "@" { tokens = tokens + [["AT", "@"]]; pos = pos + 1 }
+        else { error("lexer: unexpected character") }
+    }
+    tokens = tokens + [["EOF", ""]]
+    return tokens
+}
+
+def tok_type(tokens, pos) { return tokens[pos][0] }
+def tok_value(tokens, pos) { return tokens[pos][1] }
+
+def expect(tokens, pos, ttype) {
+    if tok_type(tokens, pos) != ttype { error("parser: expected " + ttype) }
+    return pos + 1
+}
+
+def digit_value(ch) {
+    if ch == "0" { return 0 }
+    if ch == "1" { return 1 }
+    if ch == "2" { return 2 }
+    if ch == "3" { return 3 }
+    if ch == "4" { return 4 }
+    if ch == "5" { return 5 }
+    if ch == "6" { return 6 }
+    if ch == "7" { return 7 }
+    if ch == "8" { return 8 }
+    if ch == "9" { return 9 }
+    return 0
+}
+
+def to_number(s) {
+    n = len(s)
+    i = 0
+    int_part = 0
+    while i < n and s[i] != "." {
+        int_part = int_part * 10 + digit_value(s[i])
+        i = i + 1
+    }
+    if i >= n { return int_part }
+    i = i + 1
+    frac_part = 0
+    frac_div = 1
+    while i < n {
+        frac_part = frac_part * 10 + digit_value(s[i])
+        frac_div = frac_div * 10
+        i = i + 1
+    }
+    return int_part + (frac_part / frac_div)
+}
+
+def parse(tokens) {
+    statements = []
+    pos = 0
+    while tok_type(tokens, pos) != "EOF" {
+        result = parse_statement(tokens, pos)
+        statements = statements + [result[0]]
+        pos = result[1]
+    }
+    return ["Program", statements]
+}
+
+def parse_statement(tokens, pos) {
+    t = tok_type(tokens, pos)
+    if t == "IF" { return parse_if(tokens, pos) }
+    if t == "WHILE" { return parse_while(tokens, pos) }
+    if t == "FOR" { return parse_for(tokens, pos) }
+    if t == "DEF" { return parse_funcdef(tokens, pos) }
+    return parse_simple_stmt(tokens, pos)
+}
+
+def parse_simple_stmt(tokens, pos) {
+    t = tok_type(tokens, pos)
+    if t == "RETURN" {
+        pos = pos + 1
+        nt = tok_type(tokens, pos)
+        if nt == "RBRACE" or nt == "EOF" { return [["Return", none], pos] }
+        result = parse_expr(tokens, pos)
+        return [["Return", result[0]], result[1]]
+    }
+    if t == "BREAK" { return [["Break"], pos + 1] }
+    if t == "CONTINUE" { return [["Continue"], pos + 1] }
+    if t == "IDENTIFIER" and tok_type(tokens, pos + 1) == "ASSIGN" {
+        name = tok_value(tokens, pos)
+        pos = pos + 2
+        result = parse_expr(tokens, pos)
+        return [["Assign", name, result[0]], result[1]]
+    }
+    result = parse_expr(tokens, pos)
+    return [["ExprStmt", result[0]], result[1]]
+}
+
+def parse_block(tokens, pos) {
+    pos = expect(tokens, pos, "LBRACE")
+    statements = []
+    while tok_type(tokens, pos) != "RBRACE" {
+        result = parse_statement(tokens, pos)
+        statements = statements + [result[0]]
+        pos = result[1]
+    }
+    pos = expect(tokens, pos, "RBRACE")
+    return [statements, pos]
+}
+
+def parse_if(tokens, pos) {
+    pos = pos + 1
+    result = parse_expr(tokens, pos)
+    cond = result[0]
+    pos = result[1]
+    result = parse_block(tokens, pos)
+    branches = [[cond, result[0]]]
+    pos = result[1]
+    while tok_type(tokens, pos) == "ELIF" {
+        pos = pos + 1
+        result = parse_expr(tokens, pos)
+        cond2 = result[0]
+        pos = result[1]
+        result = parse_block(tokens, pos)
+        branches = branches + [[cond2, result[0]]]
+        pos = result[1]
+    }
+    else_body = none
+    if tok_type(tokens, pos) == "ELSE" {
+        pos = pos + 1
+        result = parse_block(tokens, pos)
+        else_body = result[0]
+        pos = result[1]
+    }
+    return [["If", branches, else_body], pos]
+}
+
+def parse_while(tokens, pos) {
+    pos = pos + 1
+    result = parse_expr(tokens, pos)
+    cond = result[0]
+    pos = result[1]
+    result = parse_block(tokens, pos)
+    return [["While", cond, result[0]], result[1]]
+}
+
+def parse_for(tokens, pos) {
+    pos = pos + 1
+    name = tok_value(tokens, pos)
+    pos = pos + 1
+    pos = expect(tokens, pos, "IN")
+    result = parse_expr(tokens, pos)
+    iterable = result[0]
+    pos = result[1]
+    result = parse_block(tokens, pos)
+    return [["For", name, iterable, result[0]], result[1]]
+}
+
+def parse_funcdef(tokens, pos) {
+    pos = pos + 1
+    name = tok_value(tokens, pos)
+    pos = pos + 1
+    pos = expect(tokens, pos, "LPAREN")
+    params = []
+    if tok_type(tokens, pos) != "RPAREN" {
+        params = params + [tok_value(tokens, pos)]
+        pos = pos + 1
+        while tok_type(tokens, pos) == "COMMA" {
+            pos = pos + 1
+            params = params + [tok_value(tokens, pos)]
+            pos = pos + 1
+        }
+    }
+    pos = expect(tokens, pos, "RPAREN")
+    result = parse_block(tokens, pos)
+    return [["FuncDef", name, params, result[0]], result[1]]
+}
+
+def parse_expr(tokens, pos) { return parse_or(tokens, pos) }
+
+def parse_or(tokens, pos) {
+    result = parse_and(tokens, pos)
+    left = result[0]
+    pos = result[1]
+    while tok_type(tokens, pos) == "OR" {
+        pos = pos + 1
+        result = parse_and(tokens, pos)
+        left = ["BinOp", "or", left, result[0]]
+        pos = result[1]
+    }
+    return [left, pos]
+}
+
+def parse_and(tokens, pos) {
+    result = parse_not(tokens, pos)
+    left = result[0]
+    pos = result[1]
+    while tok_type(tokens, pos) == "AND" {
+        pos = pos + 1
+        result = parse_not(tokens, pos)
+        left = ["BinOp", "and", left, result[0]]
+        pos = result[1]
+    }
+    return [left, pos]
+}
+
+def parse_not(tokens, pos) {
+    if tok_type(tokens, pos) == "NOT" {
+        pos = pos + 1
+        result = parse_not(tokens, pos)
+        return [["UnaryOp", "not", result[0]], result[1]]
+    }
+    return parse_comp(tokens, pos)
+}
+
+def is_comp_op(t) {
+    ops = ["EQ", "NEQ", "LE", "GE", "LT", "GT"]
+    for o in ops { if t == o { return true } }
+    return false
+}
+
+def parse_comp(tokens, pos) {
+    result = parse_add(tokens, pos)
+    left = result[0]
+    pos = result[1]
+    while is_comp_op(tok_type(tokens, pos)) {
+        op = tok_value(tokens, pos)
+        pos = pos + 1
+        result = parse_add(tokens, pos)
+        left = ["BinOp", op, left, result[0]]
+        pos = result[1]
+    }
+    return [left, pos]
+}
+
+def parse_add(tokens, pos) {
+    result = parse_mul(tokens, pos)
+    left = result[0]
+    pos = result[1]
+    while tok_type(tokens, pos) == "PLUS" or tok_type(tokens, pos) == "MINUS" {
+        op = tok_value(tokens, pos)
+        pos = pos + 1
+        result = parse_mul(tokens, pos)
+        left = ["BinOp", op, left, result[0]]
+        pos = result[1]
+    }
+    return [left, pos]
+}
+
+def parse_mul(tokens, pos) {
+    result = parse_unary(tokens, pos)
+    left = result[0]
+    pos = result[1]
+    while tok_type(tokens, pos) == "STAR" or tok_type(tokens, pos) == "SLASH" {
+        op = tok_value(tokens, pos)
+        pos = pos + 1
+        result = parse_unary(tokens, pos)
+        left = ["BinOp", op, left, result[0]]
+        pos = result[1]
+    }
+    return [left, pos]
+}
+
+def parse_unary(tokens, pos) {
+    if tok_type(tokens, pos) == "MINUS" {
+        pos = pos + 1
+        result = parse_unary(tokens, pos)
+        return [["UnaryOp", "-", result[0]], result[1]]
+    }
+    return parse_call(tokens, pos)
+}
+
+def parse_call(tokens, pos) {
+    result = parse_atom(tokens, pos)
+    expr = result[0]
+    pos = result[1]
+    looping = true
+    while looping {
+        t = tok_type(tokens, pos)
+        if t == "AT" {
+            pos = pos + 1
+            name = tok_value(tokens, pos)
+            pos = pos + 1
+            expr = ["Attribute", expr, name]
+            if tok_type(tokens, pos) == "LPAREN" {
+                result = parse_args(tokens, pos)
+                expr = ["Call", expr, result[0]]
+                pos = result[1]
+            }
+        } elif t == "LPAREN" {
+            result = parse_args(tokens, pos)
+            expr = ["Call", expr, result[0]]
+            pos = result[1]
+        } elif t == "LBRACK" {
+            pos = pos + 1
+            result = parse_expr(tokens, pos)
+            expr = ["Index", expr, result[0]]
+            pos = expect(tokens, result[1], "RBRACK")
+        } else {
+            looping = false
+        }
+    }
+    return [expr, pos]
+}
+
+def parse_args(tokens, pos) {
+    pos = pos + 1
+    args = []
+    if tok_type(tokens, pos) != "RPAREN" {
+        result = parse_expr(tokens, pos)
+        args = args + [result[0]]
+        pos = result[1]
+        while tok_type(tokens, pos) == "COMMA" {
+            pos = pos + 1
+            result = parse_expr(tokens, pos)
+            args = args + [result[0]]
+            pos = result[1]
+        }
+    }
+    pos = expect(tokens, pos, "RPAREN")
+    return [args, pos]
+}
+
+def parse_atom(tokens, pos) {
+    t = tok_type(tokens, pos)
+    v = tok_value(tokens, pos)
+    if t == "NUMBER" { return [["NumLit", to_number(v), v], pos + 1] }
+    if t == "STRING" { return [["StrLit", v], pos + 1] }
+    if t == "BOOL" {
+        if v == "true" { return [["BoolLit", true], pos + 1] }
+        return [["BoolLit", false], pos + 1]
+    }
+    if t == "NONE" { return [["NoneLit"], pos + 1] }
+    if t == "IDENTIFIER" { return [["Identifier", v], pos + 1] }
+    if t == "LPAREN" {
+        pos = pos + 1
+        result = parse_expr(tokens, pos)
+        pos = expect(tokens, result[1], "RPAREN")
+        return [result[0], pos]
+    }
+    if t == "LBRACK" {
+        pos = pos + 1
+        elements = []
+        if tok_type(tokens, pos) != "RBRACK" {
+            result = parse_expr(tokens, pos)
+            elements = elements + [result[0]]
+            pos = result[1]
+            while tok_type(tokens, pos) == "COMMA" {
+                pos = pos + 1
+                result = parse_expr(tokens, pos)
+                elements = elements + [result[0]]
+                pos = result[1]
+            }
+        }
+        pos = expect(tokens, pos, "RBRACK")
+        return [["ListLiteral", elements], pos]
+    }
+    error("parser: unexpected token")
+    return [none, pos]
+}
+
+C_RUNTIME = "#include <stdio.h>\n#include <stdlib.h>\n#include <string.h>\n#include <sys/wait.h>\ntypedef enum { ZNONE, ZBOOL, ZNUM, ZSTR, ZLIST } ZTag;\ntypedef struct ZVal ZVal;\ntypedef struct ZList { ZVal *items; int count; int cap; } ZList;\nstruct ZVal { ZTag tag; union { int b; double n; const char *s; ZList *list; } as; };\nstatic int g_argc = 0;\nstatic char **g_argv = NULL;\nstatic ZVal znone(void){ ZVal v; v.tag=ZNONE; return v; }\nstatic ZVal zbool(int b){ ZVal v; v.tag=ZBOOL; v.as.b=b; return v; }\nstatic ZVal znum(double n){ ZVal v; v.tag=ZNUM; v.as.n=n; return v; }\nstatic ZVal zstr(const char *s){ ZVal v; v.tag=ZSTR; v.as.s=s; return v; }\nstatic void zerr(const char *m){ fprintf(stderr, \"[Runtime] %s\\n\", m); exit(1); }\nstatic ZVal zlistnew(void){ ZVal v; v.tag=ZLIST; v.as.list=(ZList*)malloc(sizeof(ZList)); v.as.list->items=NULL; v.as.list->count=0; v.as.list->cap=0; return v; }\nstatic void zpush(ZVal l, ZVal item){ ZList *L=l.as.list; if(L->count>=L->cap){ L->cap=L->cap?L->cap*2:4; L->items=(ZVal*)realloc(L->items,sizeof(ZVal)*L->cap);} L->items[L->count++]=item; }\nstatic ZVal zindex(ZVal obj, ZVal idx){\n  int i=(int)idx.as.n;\n  if(obj.tag==ZLIST){ if(i<0) i+=obj.as.list->count; if(i<0||i>=obj.as.list->count) zerr(\"index out of range\"); return obj.as.list->items[i]; }\n  if(obj.tag==ZSTR){ int sl=(int)strlen(obj.as.s); if(i<0) i+=sl; if(i<0||i>=sl) zerr(\"index out of range\"); char *b=(char*)malloc(2); b[0]=obj.as.s[i]; b[1]=0; return zstr(b); }\n  zerr(\"not subscriptable\"); return znone();\n}\nstatic ZVal zlen(ZVal v){ if(v.tag==ZSTR) return znum((double)strlen(v.as.s)); if(v.tag==ZLIST) return znum((double)v.as.list->count); zerr(\"len() needs str/list\"); return znone(); }\nstatic int ztruthy(ZVal v){ if(v.tag==ZNONE) return 0; if(v.tag==ZBOOL) return v.as.b; if(v.tag==ZNUM) return v.as.n!=0; if(v.tag==ZSTR) return v.as.s[0]!=0; if(v.tag==ZLIST) return v.as.list->count>0; return 0; }\nstatic void zprintval(ZVal v){\n  if(v.tag==ZNONE) printf(\"None\");\n  else if(v.tag==ZBOOL) printf(v.as.b?\"True\":\"False\");\n  else if(v.tag==ZNUM){ if(v.as.n==(long long)v.as.n) printf(\"%lld\",(long long)v.as.n); else printf(\"%g\", v.as.n); }\n  else if(v.tag==ZSTR) printf(\"%s\", v.as.s);\n  else if(v.tag==ZLIST){ printf(\"[\"); for(int i=0;i<v.as.list->count;i++){ if(i) printf(\", \"); zprintval(v.as.list->items[i]); } printf(\"]\"); }\n}\nstatic ZVal zprint(ZVal v){ zprintval(v); printf(\"\\n\"); return znone(); }\nstatic ZVal zadd(ZVal a, ZVal b){\n  if(a.tag==ZNUM&&b.tag==ZNUM) return znum(a.as.n+b.as.n);\n  if(a.tag==ZSTR&&b.tag==ZSTR){ size_t l=strlen(a.as.s)+strlen(b.as.s)+1; char*buf=(char*)malloc(l); snprintf(buf,l,\"%s%s\",a.as.s,b.as.s); return zstr(buf); }\n  if(a.tag==ZLIST&&b.tag==ZLIST){ ZVal r=zlistnew(); for(int i=0;i<a.as.list->count;i++) zpush(r,a.as.list->items[i]); for(int i=0;i<b.as.list->count;i++) zpush(r,b.as.list->items[i]); return r; }\n  zerr(\"bad + operands\"); return znone();\n}\nstatic ZVal zsub(ZVal a, ZVal b){ if(a.tag==ZNUM&&b.tag==ZNUM) return znum(a.as.n-b.as.n); zerr(\"bad - operands\"); return znone(); }\nstatic ZVal zmul(ZVal a, ZVal b){ if(a.tag==ZNUM&&b.tag==ZNUM) return znum(a.as.n*b.as.n); zerr(\"bad * operands\"); return znone(); }\nstatic ZVal zdiv(ZVal a, ZVal b){ if(a.tag==ZNUM&&b.tag==ZNUM){ if(b.as.n==0) zerr(\"division by zero\"); return znum(a.as.n/b.as.n);} zerr(\"bad / operands\"); return znone(); }\nstatic int zeqv(ZVal a, ZVal b){\n  if(a.tag!=b.tag) return 0;\n  if(a.tag==ZNONE) return 1;\n  if(a.tag==ZBOOL) return a.as.b==b.as.b;\n  if(a.tag==ZNUM) return a.as.n==b.as.n;\n  if(a.tag==ZSTR) return strcmp(a.as.s,b.as.s)==0;\n  return 0;\n}\nstatic ZVal zeq(ZVal a, ZVal b){ return zbool(zeqv(a,b)); }\nstatic ZVal zneq(ZVal a, ZVal b){ return zbool(!zeqv(a,b)); }\nstatic ZVal zlt(ZVal a, ZVal b){ if(a.tag==ZNUM&&b.tag==ZNUM) return zbool(a.as.n<b.as.n); if(a.tag==ZSTR&&b.tag==ZSTR) return zbool(strcmp(a.as.s,b.as.s)<0); zerr(\"bad < operands\"); return znone(); }\nstatic ZVal zgt(ZVal a, ZVal b){ if(a.tag==ZNUM&&b.tag==ZNUM) return zbool(a.as.n>b.as.n); if(a.tag==ZSTR&&b.tag==ZSTR) return zbool(strcmp(a.as.s,b.as.s)>0); zerr(\"bad > operands\"); return znone(); }\nstatic ZVal zle(ZVal a, ZVal b){ if(a.tag==ZNUM&&b.tag==ZNUM) return zbool(a.as.n<=b.as.n); if(a.tag==ZSTR&&b.tag==ZSTR) return zbool(strcmp(a.as.s,b.as.s)<=0); zerr(\"bad <= operands\"); return znone(); }\nstatic ZVal zge(ZVal a, ZVal b){ if(a.tag==ZNUM&&b.tag==ZNUM) return zbool(a.as.n>=b.as.n); if(a.tag==ZSTR&&b.tag==ZSTR) return zbool(strcmp(a.as.s,b.as.s)>=0); zerr(\"bad >= operands\"); return znone(); }\nstatic ZVal zneg(ZVal a){ if(a.tag==ZNUM) return znum(-a.as.n); zerr(\"bad unary -\"); return znone(); }\nstatic ZVal znotv(ZVal a){ return zbool(!ztruthy(a)); }\nstatic ZVal zai_chat(ZVal m){ printf(\"[ai@chat] \"); zprintval(m); printf(\"\\n\"); return m; }\nstatic ZVal zrobot_walk(ZVal s){ printf(\"[robot@walk] walking\\n\"); return s; }\nstatic ZVal zerrdyn(ZVal v){ zerr(v.as.s); return zno
